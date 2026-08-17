@@ -6,6 +6,7 @@ using Microsoft.OpenApi;
 using UserService.Data;
 using UserService.Repositories;
 using UserService.Services;
+using UserService.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -98,6 +99,11 @@ builder.Services.AddSwaggerGen(options =>
         });
 });
 
+builder.Services.AddHealthChecks()
+    .AddNpgSql(
+        builder.Configuration.GetConnectionString("UserDatabase")!
+    );
+
 var app = builder.Build();
 
 // Swagger
@@ -106,6 +112,11 @@ if (app.Environment.IsDevelopment())
     app.UseSwagger();
     app.UseSwaggerUI();
 }
+
+app.MapHealthChecks("/health");
+
+
+app.UseMiddleware<ExceptionHandlingMiddleware>();
 
 app.UseHttpsRedirection();
 

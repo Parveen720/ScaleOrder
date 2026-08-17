@@ -1,9 +1,12 @@
 using System.Text;
+
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
+
 using OrderService.Data;
+using OrderService.Middleware;
 using OrderService.Repositories;
 using OrderService.Services;
 
@@ -16,7 +19,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 
 // --------------------------------------------------
-// PostgreSQL
+// Database
 // --------------------------------------------------
 
 builder.Services.AddDbContext<OrderDbContext>(options =>
@@ -37,6 +40,10 @@ builder.Services.AddScoped(
 builder.Services.AddScoped<
     IOrderRepository,
     OrderRepository>();
+
+builder.Services.AddScoped<
+    IIdempotencyRepository,
+    IdempotencyRepository>();
 
 builder.Services.AddScoped<
     IOrderService,
@@ -92,13 +99,15 @@ builder.Services.AddEndpointsApiExplorer();
 
 builder.Services.AddSwaggerGen(options =>
 {
-    options.SwaggerDoc("v1", new OpenApiInfo
-    {
-        Title = "ScaleOrder Order Service",
-        Version = "v1",
-        Description =
-            "Order management microservice."
-    });
+    options.SwaggerDoc(
+        "v1",
+        new OpenApiInfo
+        {
+            Title = "ScaleOrder Order Service",
+            Version = "v1",
+            Description =
+                "Order management microservice."
+        });
 
     options.AddSecurityDefinition(
         "Bearer",
@@ -128,7 +137,16 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 // --------------------------------------------------
-// Build
+// Health Checks
+// --------------------------------------------------
+
+builder.Services.AddHealthChecks()
+    .AddNpgSql(
+        builder.Configuration
+            .GetConnectionString("OrderDatabase")!);
+
+// --------------------------------------------------
+// Build Application
 // --------------------------------------------------
 
 var app = builder.Build();
@@ -145,14 +163,26 @@ if (app.Environment.IsDevelopment())
 }
 
 // --------------------------------------------------
-// Middleware
+// Middleware Pipeline
 // --------------------------------------------------
+
+app.UseMiddleware<ExceptionHandlingMiddleware>();
 
 app.UseHttpsRedirection();
 
 app.UseAuthentication();
 
 app.UseAuthorization();
+
+// --------------------------------------------------
+// Health Check Endpoint
+// --------------------------------------------------
+
+app.MapHealthChecks("/health");
+
+// --------------------------------------------------
+// Controllers
+// --------------------------------------------------
 
 app.MapControllers();
 

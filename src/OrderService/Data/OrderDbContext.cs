@@ -15,6 +15,9 @@ public class OrderDbContext : DbContext
 
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
 
+    public DbSet<IdempotencyRecord> IdempotencyRecords
+        => Set<IdempotencyRecord>();
+
     protected override void OnModelCreating(
         ModelBuilder modelBuilder)
     {
@@ -61,6 +64,43 @@ public class OrderDbContext : DbContext
                 .IsRequired();
 
             entity.HasIndex(i => i.ProductId);
+        });
+
+        modelBuilder.Entity<IdempotencyRecord>(entity =>
+        {
+            entity.HasKey(i => i.Id);
+
+            entity.Property(i => i.Key)
+                .IsRequired()
+                .HasMaxLength(200);
+
+            entity.Property(i => i.UserId)
+                .IsRequired();
+
+            entity.Property(i => i.RequestHash)
+                .IsRequired()
+                .HasMaxLength(64);
+
+            entity.Property(i => i.OrderId)
+                .IsRequired();
+
+            entity.Property(i => i.ResponseStatusCode)
+                .IsRequired();
+
+            entity.Property(i => i.ResponseBody)
+                .IsRequired();
+
+            entity.Property(i => i.CreatedAt)
+                .IsRequired();
+
+            // Critical for concurrent duplicate requests.
+            // The same user cannot use the same key twice.
+            entity.HasIndex(i => new
+            {
+                i.UserId,
+                i.Key
+            })
+            .IsUnique();
         });
     }
 }

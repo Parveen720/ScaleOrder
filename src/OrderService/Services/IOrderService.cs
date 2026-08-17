@@ -6,7 +6,8 @@ public interface IOrderService
 {
     Task<OrderResponseDto> CreateOrderAsync(
         Guid userId,
-        CreateOrderRequestDto request);
+        CreateOrderRequestDto request,
+        string idempotencyKey);
 
     Task<OrderResponseDto?> GetOrderAsync(
         Guid orderId);

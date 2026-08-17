@@ -1,6 +1,8 @@
 ﻿using System.Security.Claims;
+
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+
 using OrderService.DTOs;
 using OrderService.Services;
 
@@ -13,14 +15,17 @@ public class OrdersController : ControllerBase
 {
     private readonly IOrderService _orderService;
 
-    public OrdersController(IOrderService orderService)
+    public OrdersController(
+        IOrderService orderService)
     {
         _orderService = orderService;
     }
 
     [HttpPost]
     public async Task<IActionResult> CreateOrder(
-        CreateOrderRequestDto request)
+        CreateOrderRequestDto request,
+        [FromHeader(Name = "Idempotency-Key")]
+        string? idempotencyKey)
     {
         var userId = GetUserId();
 
@@ -31,8 +36,20 @@ public class OrdersController : ControllerBase
 
         try
         {
+            if (string.IsNullOrWhiteSpace(idempotencyKey))
+            {
+                return BadRequest(new
+                {
+                    message =
+                        "Idempotency-Key header is required."
+                });
+            }
+
             var order = await _orderService
-                .CreateOrderAsync(userId.Value, request);
+                .CreateOrderAsync(
+                    userId.Value,
+                    request,
+                    idempotencyKey);
 
             return CreatedAtAction(
                 nameof(GetOrder),
@@ -69,7 +86,6 @@ public class OrdersController : ControllerBase
             });
         }
 
-        // User can only access their own order.
         if (order.UserId != userId.Value)
         {
             return Forbid();
