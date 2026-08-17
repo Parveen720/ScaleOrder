@@ -1,6 +1,16 @@
-﻿namespace OrderService.Services
+﻿using OrderService.DTOs;
+
+namespace OrderService.Services;
+
+public interface IOrderService
 {
-    public class IOrderService
-    {
-    }
+    Task<OrderResponseDto> CreateOrderAsync(
+        Guid userId,
+        CreateOrderRequestDto request);
+
+    Task<OrderResponseDto?> GetOrderAsync(
+        Guid orderId);
+
+    Task<IEnumerable<OrderResponseDto>> GetUserOrdersAsync(
+        Guid userId);
 }
