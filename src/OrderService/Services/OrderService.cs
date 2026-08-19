@@ -1,9 +1,7 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-
 using Microsoft.EntityFrameworkCore;
-
 using OrderService.Data;
 using OrderService.DTOs;
 using OrderService.Models;
@@ -35,9 +33,9 @@ public class OrderService : IOrderService
         CreateOrderRequestDto request,
         string idempotencyKey)
     {
-        // --------------------------------------------------
+   
         // 1. Validate Idempotency Key
-        // --------------------------------------------------
+       
 
         if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
@@ -53,9 +51,8 @@ public class OrderService : IOrderService
                 "Idempotency-Key cannot exceed 200 characters.");
         }
 
-        // --------------------------------------------------
         // 2. Check whether this request was already processed
-        // --------------------------------------------------
+      
 
         var existingRecord =
             await _idempotencyRepository.GetAsync(
@@ -83,9 +80,8 @@ public class OrderService : IOrderService
             return previousResponse;
         }
 
-        // --------------------------------------------------
+      
         // 3. Validate Order
-        // --------------------------------------------------
 
         if (request.Items == null ||
             request.Items.Count == 0)
@@ -94,17 +90,16 @@ public class OrderService : IOrderService
                 "Order must contain at least one item.");
         }
 
-        // --------------------------------------------------
+  
         // 4. Generate request hash
-        // --------------------------------------------------
+       
 
         var requestHash =
             GenerateRequestHash(request);
 
-        // --------------------------------------------------
+       
         // 5. Create Order
-        // --------------------------------------------------
-
+      
         var order = new Order
         {
             Id = Guid.NewGuid(),
@@ -144,18 +139,18 @@ public class OrderService : IOrderService
         order.TotalAmount = order.Items
             .Sum(i => i.TotalPrice);
 
-        // --------------------------------------------------
+      
         // 6. Create response
-        // --------------------------------------------------
+     
 
         var response = MapToResponse(order);
 
         var responseBody =
             JsonSerializer.Serialize(response);
 
-        // --------------------------------------------------
+        
         // 7. Create Idempotency Record
-        // --------------------------------------------------
+      
 
         var idempotencyRecord = new IdempotencyRecord
         {
@@ -176,9 +171,9 @@ public class OrderService : IOrderService
             CreatedAt = DateTime.UtcNow
         };
 
-        // --------------------------------------------------
+      
         // 8. ATOMIC TRANSACTION
-        // --------------------------------------------------
+
 
         await using var transaction =
             await _dbContext.Database

@@ -12,15 +12,8 @@ using OrderService.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// --------------------------------------------------
-// Controllers
-// --------------------------------------------------
-
 builder.Services.AddControllers();
 
-// --------------------------------------------------
-// Database
-// --------------------------------------------------
 
 builder.Services.AddDbContext<OrderDbContext>(options =>
 {
@@ -29,9 +22,6 @@ builder.Services.AddDbContext<OrderDbContext>(options =>
             .GetConnectionString("OrderDatabase"));
 });
 
-// --------------------------------------------------
-// Dependency Injection
-// --------------------------------------------------
 
 builder.Services.AddScoped(
     typeof(IRepository<>),
@@ -49,9 +39,6 @@ builder.Services.AddScoped<
     IOrderService,
     OrderService.Services.OrderService>();
 
-// --------------------------------------------------
-// JWT Authentication
-// --------------------------------------------------
 
 var jwtKey = builder.Configuration["Jwt:Key"];
 
@@ -91,9 +78,6 @@ builder.Services
 
 builder.Services.AddAuthorization();
 
-// --------------------------------------------------
-// Swagger
-// --------------------------------------------------
 
 builder.Services.AddEndpointsApiExplorer();
 
@@ -136,24 +120,17 @@ builder.Services.AddSwaggerGen(options =>
         });
 });
 
-// --------------------------------------------------
-// Health Checks
-// --------------------------------------------------
+//healthcheck code
 
 builder.Services.AddHealthChecks()
     .AddNpgSql(
         builder.Configuration
             .GetConnectionString("OrderDatabase")!);
 
-// --------------------------------------------------
-// Build Application
-// --------------------------------------------------
 
 var app = builder.Build();
 
-// --------------------------------------------------
-// Swagger
-// --------------------------------------------------
+//swagger
 
 if (app.Environment.IsDevelopment())
 {
@@ -162,9 +139,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-// --------------------------------------------------
-// Middleware Pipeline
-// --------------------------------------------------
+//middleware pipeline
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 
@@ -174,15 +149,10 @@ app.UseAuthentication();
 
 app.UseAuthorization();
 
-// --------------------------------------------------
-// Health Check Endpoint
-// --------------------------------------------------
 
 app.MapHealthChecks("/health");
 
-// --------------------------------------------------
-// Controllers
-// --------------------------------------------------
+
 
 app.MapControllers();
 
