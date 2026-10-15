@@ -2,8 +2,11 @@
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Http;
+using Npgsql;
 using OrderService.Data;
 using OrderService.DTOs;
+using OrderService.Exceptions;
 using OrderService.Models;
 using OrderService.Repositories;
 
@@ -33,10 +36,7 @@ public class OrderService : IOrderService
         CreateOrderRequestDto request,
         string idempotencyKey)
     {
-   
-        // 1. Validate Idempotency Key
-       
-
+        // 1. Validate the idempotency key.
         if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
             throw new ArgumentException(
@@ -51,166 +51,151 @@ public class OrderService : IOrderService
                 "Idempotency-Key cannot exceed 200 characters.");
         }
 
-        // 2. Check whether this request was already processed
-      
-
-        var existingRecord =
-            await _idempotencyRepository.GetAsync(
-                userId,
-                idempotencyKey);
-
-        if (existingRecord != null)
-        {
-            _logger.LogInformation(
-                "Duplicate order request detected. UserId: {UserId}, IdempotencyKey: {IdempotencyKey}, OrderId: {OrderId}",
-                userId,
-                idempotencyKey,
-                existingRecord.OrderId);
-
-            var previousResponse =
-                JsonSerializer.Deserialize<OrderResponseDto>(
-                    existingRecord.ResponseBody);
-
-            if (previousResponse == null)
-            {
-                throw new InvalidOperationException(
-                    "Stored idempotency response could not be read.");
-            }
-
-            return previousResponse;
-        }
-
-      
-        // 3. Validate Order
-
-        if (request.Items == null ||
-            request.Items.Count == 0)
+        // 2. Validate the request.
+        if (request?.Items == null || request.Items.Count == 0)
         {
             throw new ArgumentException(
                 "Order must contain at least one item.");
         }
 
-  
-        // 4. Generate request hash
-       
+        foreach (var item in request.Items)
+        {
+            if (item.ProductId == Guid.Empty)
+            {
+                throw new ArgumentException(
+                    "ProductId cannot be empty.");
+            }
 
-        var requestHash =
-            GenerateRequestHash(request);
+            if (item.Quantity <= 0)
+            {
+                throw new ArgumentException(
+                    "Quantity must be greater than zero.");
+            }
 
-       
-        // 5. Create Order
-      
+            if (item.UnitPrice <= 0)
+            {
+                throw new ArgumentException(
+                    "UnitPrice must be greater than zero.");
+            }
+        }
+
+        // 3. Hash the request BEFORE checking the existing key.
+        var requestHash = GenerateRequestHash(request);
+
+        var existingRecord = await _idempotencyRepository.GetAsync(
+            userId,
+            idempotencyKey);
+
+        if (existingRecord != null)
+        {
+            return ReplayOrConflict(existingRecord, requestHash);
+        }
+
+        // 4. Build the order.
         var order = new Order
         {
             Id = Guid.NewGuid(),
-
             UserId = userId,
-
             Status = OrderStatus.Pending,
-
             CreatedAt = DateTime.UtcNow,
-
             UpdatedAt = DateTime.UtcNow
         };
 
-        foreach (var item in request.Items)
+        try
         {
-            var totalPrice =
-                item.Quantity * item.UnitPrice;
-
-            var orderItem = new OrderItem
+            foreach (var item in request.Items)
             {
-                Id = Guid.NewGuid(),
+                var totalPrice = item.Quantity * item.UnitPrice;
 
-                OrderId = order.Id,
+                order.Items.Add(new OrderItem
+                {
+                    Id = Guid.NewGuid(),
+                    OrderId = order.Id,
+                    ProductId = item.ProductId,
+                    Quantity = item.Quantity,
+                    UnitPrice = item.UnitPrice,
+                    TotalPrice = totalPrice
+                });
+            }
 
-                ProductId = item.ProductId,
-
-                Quantity = item.Quantity,
-
-                UnitPrice = item.UnitPrice,
-
-                TotalPrice = totalPrice
-            };
-
-            order.Items.Add(orderItem);
+            order.TotalAmount = order.Items.Sum(
+                item => item.TotalPrice);
+        }
+        catch (OverflowException)
+        {
+            throw new ArgumentException(
+                "Order amount exceeds the supported range.");
         }
 
-        order.TotalAmount = order.Items
-            .Sum(i => i.TotalPrice);
-
-      
-        // 6. Create response
-     
-
         var response = MapToResponse(order);
-
-        var responseBody =
-            JsonSerializer.Serialize(response);
-
-        
-        // 7. Create Idempotency Record
-      
 
         var idempotencyRecord = new IdempotencyRecord
         {
             Id = Guid.NewGuid(),
-
             Key = idempotencyKey,
-
             UserId = userId,
-
             RequestHash = requestHash,
-
             OrderId = order.Id,
-
-            ResponseStatusCode = 201,
-
-            ResponseBody = responseBody,
-
+            ResponseStatusCode = StatusCodes.Status201Created,
+            ResponseBody = JsonSerializer.Serialize(response),
             CreatedAt = DateTime.UtcNow
         };
 
-      
-        // 8. ATOMIC TRANSACTION
-
-
+        // 5. Save order and idempotency record atomically.
         await using var transaction =
-            await _dbContext.Database
-                .BeginTransactionAsync();
+            await _dbContext.Database.BeginTransactionAsync();
 
         try
         {
-            // Save Order
             await _orderRepository.AddAsync(order);
-
             await _orderRepository.SaveChangesAsync();
 
-            // Save Idempotency Record
-            await _idempotencyRepository
-                .AddAsync(idempotencyRecord);
+            await _idempotencyRepository.AddAsync(idempotencyRecord);
+            await _orderRepository.SaveChangesAsync();
 
-            await _orderRepository
-                .SaveChangesAsync();
-
-            // Both operations succeeded
             await transaction.CommitAsync();
 
             _logger.LogInformation(
-                "Order created successfully. OrderId: {OrderId}, UserId: {UserId}, TotalAmount: {TotalAmount}",
+                "Order created. OrderId: {OrderId}, UserId: {UserId}",
                 order.Id,
-                userId,
-                order.TotalAmount);
+                userId);
 
             return response;
         }
-        catch
+        catch (DbUpdateException ex)
+            when (IsIdempotencyUniqueViolation(ex))
         {
-            // Order and IdempotencyRecord are both rolled back
             await transaction.RollbackAsync();
 
+            // The transaction failed. Remove its tracked entities
+            // before reading the record created by the winning request.
+            _dbContext.ChangeTracker.Clear();
+
+            var winningRecord = await _idempotencyRepository.GetAsync(
+                userId,
+                idempotencyKey);
+
+            if (winningRecord != null)
+            {
+                _logger.LogInformation(
+                    "Concurrent idempotency request recovered. " +
+                    "UserId: {UserId}, OrderId: {OrderId}",
+                    userId,
+                    winningRecord.OrderId);
+
+                return ReplayOrConflict(winningRecord, requestHash);
+            }
+
+            // Do not disguise an unrelated or unresolved database error.
+            throw;
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            _dbContext.ChangeTracker.Clear();
+
             _logger.LogError(
-                "Failed to create order transaction. UserId: {UserId}, IdempotencyKey: {IdempotencyKey}",
+                "Order transaction failed. UserId: {UserId}, Key: {Key}",
                 userId,
                 idempotencyKey);
 
@@ -218,25 +203,48 @@ public class OrderService : IOrderService
         }
     }
 
-    public async Task<OrderResponseDto?> GetOrderAsync(
-        Guid orderId)
+    private static bool IsIdempotencyUniqueViolation(
+        DbUpdateException exception)
     {
-        var order = await _orderRepository
-            .GetOrderWithItemsAsync(orderId);
-
-        if (order == null)
-        {
-            return null;
-        }
-
-        return MapToResponse(order);
+        return exception.InnerException is PostgresException postgresException
+            && postgresException.SqlState ==
+                PostgresErrorCodes.UniqueViolation
+            && postgresException.ConstraintName ==
+                "IX_IdempotencyRecords_UserId_Key";
     }
 
-    public async Task<IEnumerable<OrderResponseDto>>
-        GetUserOrdersAsync(Guid userId)
+    private static OrderResponseDto ReplayOrConflict(
+        IdempotencyRecord record,
+        string requestHash)
     {
-        var orders = await _orderRepository
-            .GetOrdersByUserIdAsync(userId);
+        if (!string.Equals(
+            record.RequestHash,
+            requestHash,
+            StringComparison.Ordinal))
+        {
+            throw new IdempotencyConflictException();
+        }
+
+        var previousResponse =
+            JsonSerializer.Deserialize<OrderResponseDto>(
+                record.ResponseBody);
+
+        return previousResponse
+            ?? throw new InvalidOperationException(
+                "Stored idempotency response could not be read.");
+    }
+
+    public async Task<OrderResponseDto?> GetOrderAsync(Guid orderId)
+    {
+        var order = await _orderRepository.GetOrderWithItemsAsync(orderId);
+
+        return order == null ? null : MapToResponse(order);
+    }
+
+    public async Task<IEnumerable<OrderResponseDto>> GetUserOrdersAsync(
+        Guid userId)
+    {
+        var orders = await _orderRepository.GetOrdersByUserIdAsync(userId);
 
         return orders.Select(MapToResponse);
     }
@@ -245,41 +253,60 @@ public class OrderService : IOrderService
         CreateOrderRequestDto request)
     {
         var json = JsonSerializer.Serialize(request);
-
         var bytes = Encoding.UTF8.GetBytes(json);
-
         var hash = SHA256.HashData(bytes);
 
         return Convert.ToHexString(hash);
     }
 
-    private static OrderResponseDto MapToResponse(
-        Order order)
+    private static OrderResponseDto MapToResponse(Order order)
     {
         return new OrderResponseDto
         {
             Id = order.Id,
-
             UserId = order.UserId,
-
             TotalAmount = order.TotalAmount,
-
             Status = order.Status.ToString(),
-
             CreatedAt = order.CreatedAt,
-
-            Items = order.Items
-                .Select(item => new OrderItemResponseDto
-                {
-                    ProductId = item.ProductId,
-
-                    Quantity = item.Quantity,
-
-                    UnitPrice = item.UnitPrice,
-
-                    TotalPrice = item.TotalPrice
-                })
-                .ToList()
+            Items = order.Items.Select(item => new OrderItemResponseDto
+            {
+                ProductId = item.ProductId,
+                Quantity = item.Quantity,
+                UnitPrice = item.UnitPrice,
+                TotalPrice = item.TotalPrice
+            }).ToList()
         };
     }
+
+
+    public async Task<bool> MarkOrderAsPaidAsync(Guid orderId)
+    {
+        var order = await _orderRepository.GetOrderWithItemsAsync(orderId);
+
+        if (order == null)
+            return false;
+
+        if (order.Status == OrderStatus.Cancelled)
+            return false;
+
+        if (order.Status == OrderStatus.Paid ||
+            order.Status == OrderStatus.Processing ||
+            order.Status == OrderStatus.Shipped ||
+            order.Status == OrderStatus.Delivered)
+        {
+            return true;
+        }
+
+        order.Status = OrderStatus.Paid;
+        order.UpdatedAt = DateTime.UtcNow;
+
+        await _dbContext.SaveChangesAsync();
+
+        _logger.LogInformation(
+            "Order marked as paid. OrderId: {OrderId}",
+            orderId);
+
+        return true;
+    }
+
 }

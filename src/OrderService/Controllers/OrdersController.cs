@@ -1,10 +1,12 @@
-﻿using System.Security.Claims;
-
+﻿
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-
 using OrderService.DTOs;
 using OrderService.Services;
+using OrderService.Exceptions;
 
 namespace OrderService.Controllers;
 
@@ -14,25 +16,25 @@ namespace OrderService.Controllers;
 public class OrdersController : ControllerBase
 {
     private readonly IOrderService _orderService;
+    private readonly IConfiguration _configuration;
 
     public OrdersController(
-        IOrderService orderService)
+        IOrderService orderService,
+        IConfiguration configuration)
     {
         _orderService = orderService;
+        _configuration = configuration;
     }
 
     [HttpPost]
     public async Task<IActionResult> CreateOrder(
         CreateOrderRequestDto request,
-        [FromHeader(Name = "Idempotency-Key")]
-        string? idempotencyKey)
+        [FromHeader(Name = "Idempotency-Key")] string? idempotencyKey)
     {
         var userId = GetUserId();
 
         if (userId == null)
-        {
             return Unauthorized();
-        }
 
         try
         {
@@ -40,28 +42,27 @@ public class OrdersController : ControllerBase
             {
                 return BadRequest(new
                 {
-                    message =
-                        "Idempotency-Key header is required."
+                    message = "Idempotency-Key header is required."
                 });
             }
 
-            var order = await _orderService
-                .CreateOrderAsync(
-                    userId.Value,
-                    request,
-                    idempotencyKey);
+            var order = await _orderService.CreateOrderAsync(
+                userId.Value,
+                request,
+                idempotencyKey);
 
             return CreatedAtAction(
                 nameof(GetOrder),
                 new { id = order.Id },
                 order);
         }
+        catch (IdempotencyConflictException ex)
+        {
+            return Conflict(new { message = ex.Message });
+        }
         catch (ArgumentException ex)
         {
-            return BadRequest(new
-            {
-                message = ex.Message
-            });
+            return BadRequest(new { message = ex.Message });
         }
     }
 
@@ -71,12 +72,9 @@ public class OrdersController : ControllerBase
         var userId = GetUserId();
 
         if (userId == null)
-        {
             return Unauthorized();
-        }
 
-        var order = await _orderService
-            .GetOrderAsync(id);
+        var order = await _orderService.GetOrderAsync(id);
 
         if (order == null)
         {
@@ -87,9 +85,7 @@ public class OrdersController : ControllerBase
         }
 
         if (order.UserId != userId.Value)
-        {
             return Forbid();
-        }
 
         return Ok(order);
     }
@@ -100,33 +96,68 @@ public class OrdersController : ControllerBase
         var userId = GetUserId();
 
         if (userId == null)
-        {
             return Unauthorized();
-        }
 
-        var orders = await _orderService
-            .GetUserOrdersAsync(userId.Value);
+        var orders = await _orderService.GetUserOrdersAsync(
+            userId.Value);
 
         return Ok(orders);
     }
 
+    // Internal endpoint: PaymentService calls this after payment succeeds.
+    [HttpPost("internal/{id:guid}/paid")]
+    [AllowAnonymous]
+    public async Task<IActionResult> MarkOrderAsPaid(
+        Guid id,
+        [FromHeader(Name = "X-Internal-Service-Secret")]
+        string? suppliedSecret)
+    {
+        var configuredSecret =
+            _configuration["InternalServices:ServiceSecret"];
+
+        if (string.IsNullOrWhiteSpace(configuredSecret) ||
+            string.IsNullOrWhiteSpace(suppliedSecret))
+        {
+            return Unauthorized();
+        }
+
+        var expectedBytes = Encoding.UTF8.GetBytes(configuredSecret);
+        var suppliedBytes = Encoding.UTF8.GetBytes(suppliedSecret);
+
+        if (expectedBytes.Length != suppliedBytes.Length ||
+            !CryptographicOperations.FixedTimeEquals(
+                expectedBytes,
+                suppliedBytes))
+        {
+            return Unauthorized();
+        }
+
+        var updated = await _orderService.MarkOrderAsPaidAsync(id);
+
+        if (!updated)
+        {
+            return Conflict(new
+            {
+                message = "Order not found or cannot be marked as paid."
+            });
+        }
+
+        return Ok(new
+        {
+            orderId = id,
+            status = "Paid"
+        });
+    }
+
     private Guid? GetUserId()
     {
-        var userIdClaim = User.FindFirst(
-            ClaimTypes.NameIdentifier);
+        var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier);
 
         if (userIdClaim == null)
-        {
             return null;
-        }
 
-        if (Guid.TryParse(
-            userIdClaim.Value,
-            out var userId))
-        {
-            return userId;
-        }
-
-        return null;
+        return Guid.TryParse(userIdClaim.Value, out var userId)
+            ? userId
+            : null;
     }
 }

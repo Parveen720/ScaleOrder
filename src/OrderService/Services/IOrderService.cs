@@ -1,4 +1,5 @@
-﻿using OrderService.DTOs;
+﻿
+using OrderService.DTOs;
 
 namespace OrderService.Services;
 
@@ -9,9 +10,9 @@ public interface IOrderService
         CreateOrderRequestDto request,
         string idempotencyKey);
 
-    Task<OrderResponseDto?> GetOrderAsync(
-        Guid orderId);
+    Task<OrderResponseDto?> GetOrderAsync(Guid orderId);
 
-    Task<IEnumerable<OrderResponseDto>> GetUserOrdersAsync(
-        Guid userId);
+    Task<IEnumerable<OrderResponseDto>> GetUserOrdersAsync(Guid userId);
+
+    Task<bool> MarkOrderAsPaidAsync(Guid orderId);
 }

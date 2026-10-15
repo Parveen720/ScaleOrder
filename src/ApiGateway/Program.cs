@@ -1,5 +1,17 @@
 var builder = WebApplication.CreateBuilder(args);
 
+// Add CORS
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("Frontend", policy =>
+    {
+        policy
+            .WithOrigins("http://localhost:5173")
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
+});
+
 // Add YARP Reverse Proxy
 builder.Services
     .AddReverseProxy()
@@ -8,20 +20,18 @@ builder.Services
 
 var app = builder.Build();
 
-// Configure HTTP request pipeline
+// CORS must be before the reverse proxy
+app.UseCors("Frontend");
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-// Enable HTTPS redirection
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection();
 
-// Enable authorization
 app.UseAuthorization();
 
-// Map YARP reverse proxy
 app.MapReverseProxy();
 
 app.Run();
