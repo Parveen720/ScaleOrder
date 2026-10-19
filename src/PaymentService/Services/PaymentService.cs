@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using PaymentService.Data;
 using PaymentService.DTOs;
 using PaymentService.Models;
 using PaymentService.Repositories;
@@ -16,17 +17,23 @@ namespace PaymentService.Services;
 public class PaymentService : IPaymentService
 {
     private readonly IPaymentRepository _paymentRepository;
+    private readonly PaymentDbContext _dbContext;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
+    private readonly ILogger<PaymentService> _logger;
 
     public PaymentService(
         IPaymentRepository paymentRepository,
+        PaymentDbContext dbContext,
         IHttpClientFactory httpClientFactory,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        ILogger<PaymentService> logger)
     {
         _paymentRepository = paymentRepository;
+        _dbContext = dbContext;
         _httpClientFactory = httpClientFactory;
         _configuration = configuration;
+        _logger = logger;
     }
 
     public async Task<PaymentResponseDto> CreatePaymentAsync(
@@ -53,7 +60,6 @@ public class PaymentService : IPaymentService
 
         var fingerprint = ComputeFingerprint(request.OrderId);
 
-        // Retry handling: if payment already exists, retry the order update.
         var existing = await _paymentRepository.GetByIdempotencyKeyAsync(
             userId, idempotencyKey);
 
@@ -84,7 +90,6 @@ public class PaymentService : IPaymentService
                 "OrderService URL is invalid.");
         }
 
-        // Verify that the order belongs to the authenticated user.
         using var client = _httpClientFactory.CreateClient();
 
         client.BaseAddress = orderServiceUri;
@@ -129,6 +134,8 @@ public class PaymentService : IPaymentService
                 "Order details are invalid or do not belong to this user.");
         }
 
+        var now = DateTime.UtcNow;
+
         var payment = new Payment
         {
             OrderId = order.Id,
@@ -140,33 +147,72 @@ public class PaymentService : IPaymentService
             ProviderReference = $"SIM-{Guid.NewGuid():N}",
             IdempotencyKey = idempotencyKey,
             RequestFingerprint = fingerprint,
-            CreatedAt = DateTime.UtcNow,
-            UpdatedAt = DateTime.UtcNow
+            CreatedAt = now,
+            UpdatedAt = now
         };
 
-        await _paymentRepository.AddAsync(payment);
+        var outboxMessage = new OutboxMessage
+        {
+            Id = Guid.NewGuid(),
+            EventType = "PaymentSucceeded",
+            Payload = JsonSerializer.Serialize(new
+            {
+                EventId = Guid.NewGuid(),
+                PaymentId = payment.Id,
+                OrderId = payment.OrderId,
+                UserId = payment.UserId,
+                Amount = payment.Amount,
+                Currency = payment.Currency,
+                OccurredAt = now
+            }),
+            OccurredAt = now,
+            RetryCount = 0
+        };
+
+        // Persist payment and its event atomically.
+        await using var transaction =
+            await _dbContext.Database.BeginTransactionAsync();
 
         try
         {
-            await _paymentRepository.SaveChangesAsync();
+            await _paymentRepository.AddAsync(payment);
+            _dbContext.OutboxMessages.Add(outboxMessage);
+
+            await _dbContext.SaveChangesAsync();
+            await transaction.CommitAsync();
         }
         catch (DbUpdateException ex)
         {
-            // Another request may have inserted the same idempotency key.
+            await transaction.RollbackAsync();
+            _dbContext.ChangeTracker.Clear();
+
             if (ex.InnerException is PostgresException postgresException &&
                 postgresException.SqlState ==
                 PostgresErrorCodes.UniqueViolation)
             {
                 throw new IdempotencyConflictException(
-                    "A payment with this Idempotency-Key was concurrently created. " +
-                    "Retry the request using the same key.");
+                    "A payment with this Idempotency-Key may already exist. " +
+                    "Retry using the same key.");
             }
 
             throw;
         }
+        catch
+        {
+            await transaction.RollbackAsync();
+            _dbContext.ChangeTracker.Clear();
+            throw;
+        }
 
-        // Payment is persisted. Now update OrderService.
-        // If this fails, retrying with the same key attempts this update again.
+        _logger.LogInformation(
+            "Payment and outbox event saved. PaymentId: {PaymentId}, " +
+            "OrderId: {OrderId}, EventId: {EventId}",
+            payment.Id,
+            payment.OrderId,
+            outboxMessage.Id);
+
+        // Temporary compatibility path: preserve the working UI flow.
+        // Kafka will replace this direct notification in a later step.
         await EnsureOrderMarkedPaidAsync(payment.OrderId);
 
         return ToResponse(payment);

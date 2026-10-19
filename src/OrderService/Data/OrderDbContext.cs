@@ -1,4 +1,5 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿
+using Microsoft.EntityFrameworkCore;
 using OrderService.Models;
 
 namespace OrderService.Data;
@@ -15,6 +16,9 @@ public class OrderDbContext : DbContext
 
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
 
+    public DbSet<ProcessedEvent> ProcessedEvents
+        => Set<ProcessedEvent>();
+
     public DbSet<IdempotencyRecord> IdempotencyRecords
         => Set<IdempotencyRecord>();
 
@@ -23,6 +27,7 @@ public class OrderDbContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
 
+        // Order configuration
         modelBuilder.Entity<Order>(entity =>
         {
             entity.HasKey(o => o.Id);
@@ -48,6 +53,7 @@ public class OrderDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        // OrderItem configuration
         modelBuilder.Entity<OrderItem>(entity =>
         {
             entity.HasKey(i => i.Id);
@@ -66,6 +72,7 @@ public class OrderDbContext : DbContext
             entity.HasIndex(i => i.ProductId);
         });
 
+        // IdempotencyRecord configuration
         modelBuilder.Entity<IdempotencyRecord>(entity =>
         {
             entity.HasKey(i => i.Id);
@@ -93,14 +100,29 @@ public class OrderDbContext : DbContext
             entity.Property(i => i.CreatedAt)
                 .IsRequired();
 
-            // Critical for concurrent duplicate requests.
-            // The same user cannot use the same key twice.
+            // Prevent duplicate idempotency keys for the same user.
             entity.HasIndex(i => new
             {
                 i.UserId,
                 i.Key
             })
             .IsUnique();
+        });
+
+        // ProcessedEvent configuration
+        modelBuilder.Entity<ProcessedEvent>(entity =>
+        {
+            entity.ToTable("ProcessedEvents");
+
+            // Primary key prevents duplicate event IDs.
+            entity.HasKey(e => e.EventId);
+
+            entity.Property(e => e.EventType)
+                .HasMaxLength(200)
+                .IsRequired();
+
+            entity.Property(e => e.ProcessedAt)
+                .IsRequired();
         });
     }
 }

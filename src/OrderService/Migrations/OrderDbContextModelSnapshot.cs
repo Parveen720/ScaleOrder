@@ -123,6 +123,25 @@ namespace OrderService.Migrations
                     b.ToTable("OrderItems");
                 });
 
+            modelBuilder.Entity("OrderService.Models.ProcessedEvent", b =>
+                {
+                    b.Property<Guid>("EventId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("EventType")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("EventId");
+
+                    b.ToTable("ProcessedEvents", (string)null);
+                });
+
             modelBuilder.Entity("OrderService.Models.OrderItem", b =>
                 {
                     b.HasOne("OrderService.Models.Order", "Order")

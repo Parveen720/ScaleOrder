@@ -78,6 +78,8 @@ builder.Services.AddScoped<
     IPaymentService,
     PaymentService.Services.PaymentService>();
 
+builder.Services.AddHostedService<OutboxPublisherService>();
+
 var app = builder.Build();
 
 // Middleware

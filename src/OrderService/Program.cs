@@ -77,6 +77,7 @@ builder.Services
     });
 
 builder.Services.AddAuthorization();
+builder.Services.AddHostedService<PaymentEventsConsumer>();
 
 
 builder.Services.AddEndpointsApiExplorer();

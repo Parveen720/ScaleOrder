@@ -14,6 +14,8 @@ public class PaymentDbContext : DbContext
 
     public DbSet<Payment> Payments => Set<Payment>();
 
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -62,6 +64,35 @@ public class PaymentDbContext : DbContext
             {
                 p.UserId,
                 p.CreatedAt
+            });
+        });
+
+        modelBuilder.Entity<OutboxMessage>(entity =>
+        {
+            entity.ToTable("OutboxMessages");
+
+            entity.HasKey(e => e.Id);
+
+            entity.Property(e => e.EventType)
+                .HasMaxLength(200)
+                .IsRequired();
+
+            entity.Property(e => e.Payload)
+                .IsRequired();
+
+            entity.Property(e => e.Error)
+                .HasMaxLength(4000);
+
+            entity.Property(e => e.OccurredAt)
+                .IsRequired();
+
+            entity.Property(e => e.RetryCount)
+                .IsRequired();
+
+            entity.HasIndex(e => new
+            {
+                e.ProcessedAt,
+                e.OccurredAt
             });
         });
     }
