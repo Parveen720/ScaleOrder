@@ -1,4 +1,8 @@
 <Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/OrderService.Tests/OrderService.Tests.csproj" />
+    <Project Path="tests/PaymentService.Tests/PaymentService.Tests.csproj" />
+  </Folder>
   <Project Path="src/ApiGateway/ApiGateway.csproj" Id="dedd1bd3-9d26-4add-b791-69d5111759bf" />
   <Project Path="src/OrderService/OrderService.csproj" Id="4cc62d8d-7301-45cf-918e-2844a0414133" />
   <Project Path="src/PaymentService/PaymentService.csproj" Id="6eb46b4a-f4c1-43ef-a20f-834aca84c047" />

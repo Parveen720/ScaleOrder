@@ -1,4 +1,5 @@
-﻿using System.Security.Cryptography;
+﻿
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -18,17 +19,20 @@ public class OrderService : IOrderService
     private readonly IIdempotencyRepository _idempotencyRepository;
     private readonly OrderDbContext _dbContext;
     private readonly ILogger<OrderService> _logger;
+    private readonly IOrderCacheService _orderCache;
 
     public OrderService(
         IOrderRepository orderRepository,
         IIdempotencyRepository idempotencyRepository,
         OrderDbContext dbContext,
-        ILogger<OrderService> logger)
+        ILogger<OrderService> logger,
+        IOrderCacheService orderCache)
     {
         _orderRepository = orderRepository;
         _idempotencyRepository = idempotencyRepository;
         _dbContext = dbContext;
         _logger = logger;
+        _orderCache = orderCache;
     }
 
     public async Task<OrderResponseDto> CreateOrderAsync(
@@ -36,7 +40,6 @@ public class OrderService : IOrderService
         CreateOrderRequestDto request,
         string idempotencyKey)
     {
-        // 1. Validate the idempotency key.
         if (string.IsNullOrWhiteSpace(idempotencyKey))
         {
             throw new ArgumentException(
@@ -51,7 +54,6 @@ public class OrderService : IOrderService
                 "Idempotency-Key cannot exceed 200 characters.");
         }
 
-        // 2. Validate the request.
         if (request?.Items == null || request.Items.Count == 0)
         {
             throw new ArgumentException(
@@ -79,7 +81,6 @@ public class OrderService : IOrderService
             }
         }
 
-        // 3. Hash the request BEFORE checking the existing key.
         var requestHash = GenerateRequestHash(request);
 
         var existingRecord = await _idempotencyRepository.GetAsync(
@@ -91,7 +92,6 @@ public class OrderService : IOrderService
             return ReplayOrConflict(existingRecord, requestHash);
         }
 
-        // 4. Build the order.
         var order = new Order
         {
             Id = Guid.NewGuid(),
@@ -141,7 +141,6 @@ public class OrderService : IOrderService
             CreatedAt = DateTime.UtcNow
         };
 
-        // 5. Save order and idempotency record atomically.
         await using var transaction =
             await _dbContext.Database.BeginTransactionAsync();
 
@@ -155,6 +154,9 @@ public class OrderService : IOrderService
 
             await transaction.CommitAsync();
 
+            // Invalidate cached order list after successful commit.
+            await _orderCache.InvalidateAsync(userId);
+
             _logger.LogInformation(
                 "Order created. OrderId: {OrderId}, UserId: {UserId}",
                 order.Id,
@@ -166,9 +168,6 @@ public class OrderService : IOrderService
             when (IsIdempotencyUniqueViolation(ex))
         {
             await transaction.RollbackAsync();
-
-            // The transaction failed. Remove its tracked entities
-            // before reading the record created by the winning request.
             _dbContext.ChangeTracker.Clear();
 
             var winningRecord = await _idempotencyRepository.GetAsync(
@@ -186,7 +185,6 @@ public class OrderService : IOrderService
                 return ReplayOrConflict(winningRecord, requestHash);
             }
 
-            // Do not disguise an unrelated or unresolved database error.
             throw;
         }
         catch
@@ -244,9 +242,29 @@ public class OrderService : IOrderService
     public async Task<IEnumerable<OrderResponseDto>> GetUserOrdersAsync(
         Guid userId)
     {
-        var orders = await _orderRepository.GetOrdersByUserIdAsync(userId);
+        var cachedOrders = await _orderCache.GetAsync(userId);
 
-        return orders.Select(MapToResponse);
+        if (cachedOrders != null)
+        {
+            _logger.LogInformation(
+                "Order cache hit for user {UserId}",
+                userId);
+
+            return cachedOrders;
+        }
+
+        _logger.LogInformation(
+            "Order cache miss for user {UserId}",
+            userId);
+
+        var orders = await _orderRepository.GetOrdersByUserIdAsync(
+            userId);
+
+        var result = orders.Select(MapToResponse).ToList();
+
+        await _orderCache.SetAsync(userId, result);
+
+        return result;
     }
 
     private static string GenerateRequestHash(
@@ -278,7 +296,6 @@ public class OrderService : IOrderService
         };
     }
 
-
     public async Task<bool> MarkOrderAsPaidAsync(Guid orderId)
     {
         var order = await _orderRepository.GetOrderWithItemsAsync(orderId);
@@ -302,11 +319,14 @@ public class OrderService : IOrderService
 
         await _dbContext.SaveChangesAsync();
 
+        // Invalidate the user's cached order list.
+        await _orderCache.InvalidateAsync(order.UserId);
+
         _logger.LogInformation(
             "Order marked as paid. OrderId: {OrderId}",
             orderId);
 
         return true;
     }
-
 }
+

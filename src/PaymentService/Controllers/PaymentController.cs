@@ -13,10 +13,14 @@ namespace PaymentService.Controllers;
 public class PaymentController : ControllerBase
 {
     private readonly IPaymentService _paymentService;
+    private readonly IWebHostEnvironment _environment;
 
-    public PaymentController(IPaymentService paymentService)
+    public PaymentController(
+        IPaymentService paymentService,
+        IWebHostEnvironment environment)
     {
         _paymentService = paymentService;
+        _environment = environment;
     }
 
     [HttpPost]
@@ -38,6 +42,14 @@ public class PaymentController : ControllerBase
             return BadRequest(new
             {
                 message = "A valid Idempotency-Key header is required."
+            });
+        }
+
+        if (request.SimulateFailure && !_environment.IsDevelopment())
+        {
+            return BadRequest(new
+            {
+                message = "Payment failure simulation is disabled."
             });
         }
 

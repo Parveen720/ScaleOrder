@@ -46,8 +46,10 @@ public class PaymentService : IPaymentService
             throw new InvalidOperationException("Invalid user.");
 
         if (request == null || request.OrderId == Guid.Empty)
+        {
             throw new InvalidOperationException(
                 "A valid OrderId is required.");
+        }
 
         if (string.IsNullOrWhiteSpace(idempotencyKey) ||
             idempotencyKey.Trim().Length > 128)
@@ -71,6 +73,8 @@ public class PaymentService : IPaymentService
                     "This Idempotency-Key was already used with a different request.");
             }
 
+            // Repeating the same key returns the same attempt.
+            // Never turn an existing failed attempt into a new payment.
             if (existing.Status == PaymentStatus.Succeeded)
                 await EnsureOrderMarkedPaidAsync(existing.OrderId);
 
@@ -136,13 +140,21 @@ public class PaymentService : IPaymentService
 
         var now = DateTime.UtcNow;
 
+        var failed = request.SimulateFailure;
+
+        var eventType = failed
+            ? "PaymentFailed"
+            : "PaymentSucceeded";
+
         var payment = new Payment
         {
             OrderId = order.Id,
             UserId = userId,
             Amount = order.TotalAmount,
             Currency = "INR",
-            Status = PaymentStatus.Succeeded,
+            Status = failed
+                ? PaymentStatus.Failed
+                : PaymentStatus.Succeeded,
             Provider = "Simulated",
             ProviderReference = $"SIM-{Guid.NewGuid():N}",
             IdempotencyKey = idempotencyKey,
@@ -151,13 +163,16 @@ public class PaymentService : IPaymentService
             UpdatedAt = now
         };
 
+        var eventId = Guid.NewGuid();
+
         var outboxMessage = new OutboxMessage
         {
             Id = Guid.NewGuid(),
-            EventType = "PaymentSucceeded",
+            EventType = eventType,
             Payload = JsonSerializer.Serialize(new
             {
-                EventId = Guid.NewGuid(),
+                EventId = eventId,
+                EventType = eventType,
                 PaymentId = payment.Id,
                 OrderId = payment.OrderId,
                 UserId = payment.UserId,
@@ -169,7 +184,7 @@ public class PaymentService : IPaymentService
             RetryCount = 0
         };
 
-        // Persist payment and its event atomically.
+        // Save the payment and event atomically.
         await using var transaction =
             await _dbContext.Database.BeginTransactionAsync();
 
@@ -187,8 +202,7 @@ public class PaymentService : IPaymentService
             _dbContext.ChangeTracker.Clear();
 
             if (ex.InnerException is PostgresException postgresException &&
-                postgresException.SqlState ==
-                PostgresErrorCodes.UniqueViolation)
+                postgresException.SqlState == PostgresErrorCodes.UniqueViolation)
             {
                 throw new IdempotencyConflictException(
                     "A payment with this Idempotency-Key may already exist. " +
@@ -206,14 +220,18 @@ public class PaymentService : IPaymentService
 
         _logger.LogInformation(
             "Payment and outbox event saved. PaymentId: {PaymentId}, " +
-            "OrderId: {OrderId}, EventId: {EventId}",
+            "OrderId: {OrderId}, EventId: {EventId}, Status: {Status}",
             payment.Id,
             payment.OrderId,
-            outboxMessage.Id);
+            eventId,
+            payment.Status);
 
-        // Temporary compatibility path: preserve the working UI flow.
-        // Kafka will replace this direct notification in a later step.
-        await EnsureOrderMarkedPaidAsync(payment.OrderId);
+        // Never mark an order as paid for a failed payment.
+        // Keep this temporary compatibility path for successful payments.
+        if (payment.Status == PaymentStatus.Succeeded)
+        {
+            await EnsureOrderMarkedPaidAsync(payment.OrderId);
+        }
 
         return ToResponse(payment);
     }
