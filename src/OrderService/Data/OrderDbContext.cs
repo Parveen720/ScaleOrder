@@ -109,12 +109,11 @@ public class OrderDbContext : DbContext
             .IsUnique();
         });
 
-        // ProcessedEvent configuration
+        // ProcessedEvent configuration  &  Primary key prevents duplicate event IDs.
         modelBuilder.Entity<ProcessedEvent>(entity =>
         {
             entity.ToTable("ProcessedEvents");
 
-            // Primary key prevents duplicate event IDs.
             entity.HasKey(e => e.EventId);
 
             entity.Property(e => e.EventType)
